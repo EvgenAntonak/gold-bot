@@ -1,0 +1,184 @@
+import telebot
+from telebot import types
+
+TOKEN = "7187525135:AAE4YUnwynuTVV09Il0WXMvaEGYIKb-wp5Q"
+ADMIN_ID = 5244917444
+
+bot = telebot.TeleBot(TOKEN)
+
+PRICE_PER_100 = 32
+MIN_ORDER = 50
+
+user_states = {}
+orders = []
+
+def payment_keyboard():
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    keyboard.add("Монобанк", "А-Банк", "ПриватБанк")
+    return keyboard
+
+def main_menu():
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard.add("Замовити голду", "Мої замовлення")
+    return keyboard
+
+@bot.message_handler(commands=['start'])
+def start(message):
+    user_states[message.chat.id] = None
+    bot.send_message(message.chat.id,
+                     "Вітаю! Я бот для продажу голди.\n\n"
+                     "Щоб зробити замовлення, натисни кнопку 'Замовити голду'.",
+                     reply_markup=main_menu())
+
+@bot.message_handler(func=lambda message: user_states.get(message.chat.id) is None)
+def main_handler(message):
+    text = message.text.lower()
+
+    if text == "замовити голду":
+        bot.send_message(message.chat.id, f"Введи, будь ласка, кількість голди (мінімум {MIN_ORDER}):")
+        user_states[message.chat.id] = "waiting_amount"
+    elif text == "мої замовлення":
+        user_orders = [o for o in orders if o['user_id'] == message.chat.id]
+        if not user_orders:
+            bot.send_message(message.chat.id, "У тебе немає замовлень.")
+        else:
+            text = "Твої замовлення:\n"
+            for o in user_orders:
+                text += f"ID {o['id']}: {o['amount']} голди, оплата: {o['payment']}, статус: {o['status']}\n"
+            bot.send_message(message.chat.id, text)
+    else:
+        bot.send_message(message.chat.id, "Будь ласка, вибери команду з меню.", reply_markup=main_menu())
+
+@bot.message_handler(func=lambda message: user_states.get(message.chat.id) == "waiting_amount")
+def amount_handler(message):
+    try:
+        amount = int(message.text)
+        if amount < MIN_ORDER:
+            bot.send_message(message.chat.id, f"Мінімальна кількість голди - {MIN_ORDER}. Введи інше число:")
+            return
+        user_states[message.chat.id] = {"amount": amount}
+        price = amount * PRICE_PER_100 / 100
+        bot.send_message(message.chat.id, f"Ти замовляєш {amount} голди. Сума до оплати: {price:.2f} грн.\n"
+                                          "Обери спосіб оплати:", reply_markup=payment_keyboard())
+        user_states[message.chat.id] = "waiting_payment"
+    except ValueError:
+        bot.send_message(message.chat.id, "Введи, будь ласка, число.")
+
+@bot.message_handler(func=lambda message: user_states.get(message.chat.id) == "waiting_payment")
+def payment_handler(message):
+    payment = message.text
+    if payment not in ["Монобанк", "А-Банк", "ПриватБанк"]:
+        bot.send_message(message.chat.id, "Оберіть, будь ласка, спосіб оплати з клавіатури.")
+        return
+
+    amount = user_states[message.chat.id]["amount"]
+    price = amount * PRICE_PER_100 / 100
+
+    bot.send_message(message.chat.id, f"Надішли, будь ласка, квитанцію про оплату (фото або файл):")
+
+    user_states[message.chat.id] = {"amount": amount, "payment": payment, "awaiting_receipt": True}
+
+@bot.message_handler(content_types=['photo', 'document'])
+def receipt_handler(message):
+    state = user_states.get(message.chat.id)
+    if isinstance(state, dict) and state.get("awaiting_receipt"):
+        nick = None
+        user_states[message.chat.id] = {"awaiting_nick": True, "receipt": message}
+
+        bot.send_message(message.chat.id, "Дякую! Тепер напиши свій нік для передачі скінами:")
+
+        # Зберігаємо файл/фото в тимчасову змінну
+        state['receipt'] = message
+        user_states[message.chat.id] = state
+
+@bot.message_handler(func=lambda message: isinstance(user_states.get(message.chat.id), dict) and user_states[message.chat.id].get("awaiting_nick"))
+def nick_handler(message):
+    nick = message.text
+    data = user_states[message.chat.id]
+    amount = data["amount"]
+    payment = data["payment"]
+    price = amount * PRICE_PER_100 / 100
+
+    order_id = len(orders) + 1
+
+    # Отримаємо file_id квитанції
+    receipt_message = data.get("receipt")
+    receipt_file_id = None
+    receipt_type = None
+    if receipt_message:
+        if receipt_message.content_type == "photo":
+            receipt_file_id = receipt_message.photo[-1].file_id
+            receipt_type = "photo"
+        elif receipt_message.content_type == "document":
+            receipt_file_id = receipt_message.document.file_id
+            receipt_type = "document"
+
+    order = {
+        "id": order_id,
+        "user_id": message.chat.id,
+        "nick": nick,
+        "amount": amount,
+        "payment": payment,
+        "price": price,
+        "status": "Нове",
+        "receipt_file_id": receipt_file_id,
+        "receipt_type": receipt_type
+    }
+    orders.append(order)
+
+    bot.send_message(message.chat.id,
+                     f"Дякую! Твоє замовлення прийняте.\n\n"
+                     f"ID замовлення: {order_id}\n"
+                     f"Кількість: {amount} голди\n"
+                     f"Оплата: {payment}\n"
+                     f"Сума: {price:.2f} грн\n\n"
+                     "Очікуй на обробку замовлення.")
+
+    # Відправляємо адміну
+    admin_text = (
+        f"Нове замовлення #{order_id}\n"
+        f"Користувач: {message.from_user.first_name} (@{message.from_user.username})\n"
+        f"Нік для скінів: {nick}\n"
+        f"Кількість голди: {amount}\n"
+        f"Оплата: {payment}\n"
+        f"Сума: {price:.2f} грн\n"
+        f"Статус: Нове"
+    )
+    markup = types.InlineKeyboardMarkup()
+    markup.add(
+        types.InlineKeyboardButton("Виконано", callback_data=f"done_{order_id}"),
+        types.InlineKeyboardButton("Відхилити", callback_data=f"reject_{order_id}")
+    )
+    if receipt_file_id:
+        if receipt_type == "photo":
+            bot.send_photo(ADMIN_ID, receipt_file_id, caption=admin_text, reply_markup=markup)
+        elif receipt_type == "document":
+            bot.send_document(ADMIN_ID, receipt_file_id, caption=admin_text, reply_markup=markup)
+    else:
+        bot.send_message(ADMIN_ID, admin_text, reply_markup=markup)
+
+    user_states[message.chat.id] = None
+
+@bot.callback_query_handler(func=lambda call: call.from_user.id == ADMIN_ID)
+def admin_callback(call):
+    data = call.data
+    if data.startswith("done_"):
+        order_id = int(data.split("_")[1])
+        for o in orders:
+            if o["id"] == order_id:
+                o["status"] = "Виконано"
+                bot.edit_message_reply_markup(ADMIN_ID, call.message.message_id, reply_markup=None)
+                bot.answer_callback_query(call.id, "Замовлення відмічено як виконане.")
+                bot.send_message(o["user_id"], f"Ваше замовлення #{order_id} виконано. Дякуємо за покупку!")
+                return
+    elif data.startswith("reject_"):
+        order_id = int(data.split("_")[1])
+        for o in orders:
+            if o["id"] == order_id:
+                o["status"] = "Відхилено"
+                bot.edit_message_reply_markup(ADMIN_ID, call.message.message_id, reply_markup=None)
+                bot.answer_callback_query(call.id, "Замовлення відхилено.")
+                bot.send_message(o["user_id"], f"Ваше замовлення #{order_id} відхилено. Зв'яжіться з адміністратором.")
+                return
+
+bot.infinity_polling()
